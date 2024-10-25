@@ -1,5 +1,7 @@
+from dataclasses import dataclass
 import numpy as np
-from scipy.optimize import bisect
+from scipy.optimize import bisect, minimize
+from pyswarm import pso
 
 # Definição de constantes globais
 LCH3 = 0.2765  # Comprimento de um grupo metila (em nm)
@@ -11,18 +13,19 @@ ELEMENTARY_CHARGE = 1.6021766e-19  # Carga elementar (em C)
 EPSILON_0 = 8.8541878e-12  # Permissividade elétrica do vácuo (em F/m)
 
 
+@dataclass
+class DataUse:
+    setting: np.ndarray
+    real_data: np.ndarray
+    n: int
+    x: np.ndarray
+    y: np.ndarray
+
+
 class CmcCalculator:
     """
     Classe para calcular a concentração micelar crítica (CMC) usando métodos numéricos.
     """
-
-    def __init__(self, f_data):
-        self.temperature = f_data['real_data'][0]  # Temperatura em Kelvin
-        self.carbon_chain_length = f_data['real_data'][1]  # Comprimento da cadeia de carbono
-        self.ethylene_oxide_units = f_data['real_data'][2]  # Unidades de óxido de etileno
-        self.num_water_molecules = f_data['real_data'][3]  # Número de moléculas de água
-        self.volume_core = f_data['real_data'][4]  # Volume do núcleo da micela
-        self.num_surfactant_aggregates = f_data['real_data'][-1]  # Número de agregados de surfactantes
 
     @staticmethod
     def residue_function(surfactant_fraction, volume_fraction, segment_length, hydrophilic_volume,
@@ -40,47 +43,53 @@ class CmcCalculator:
 
         return log_term + surface_energy_term + interaction_term1 + interaction_term2
 
-    def calculate_cmc(self, parameters):
+    def calculate_cmc(self, parameters, f_data):
         """
         Calcula a concentração micelar crítica (CMC) para um conjunto de parâmetros.
         """
+        temperature = f_data.real_data[0]  # Temperatura em Kelvin
+        carbon_chain_length = f_data.real_data[1]  # Comprimento da cadeia de carbono
+        ethylene_oxide_units = f_data.real_data[2]  # Unidades de óxido de etileno
+        num_water_molecules = f_data.real_data[3]  # Número de moléculas de água
+        volume_core = f_data.real_data[4]  # Volume do núcleo da micela
+        num_surfactant_aggregates = f_data.real_data[-1]  # Número de agregados de surfactantes
+
         # Inicializações dos parâmetros de entrada
-        free_gibbs_energy = 0
+        free_gibbs_energy = 1e5
         aggregation_number = parameters[0]  # Número de agregação
         num_micelles = parameters[1]  # Número de micelas
         effective_diameter = parameters[2]  # Diâmetro efetivo
-        free_energy = 1e5  # Energia livre inicial alta (para otimização)
 
-        if aggregation_number * num_micelles < self.num_surfactant_aggregates:
+        if aggregation_number * num_micelles < num_surfactant_aggregates:
             segment_length = 0.46e-9  # Comprimento do segmento (em m)
             ethylene_volume = 0.0631e-27  # Volume de óxido de etileno (em m³)
-            hydrophilic_volume = self.ethylene_oxide_units * ethylene_volume
+            hydrophilic_volume = ethylene_oxide_units * ethylene_volume
             initial_area = segment_length * segment_length
             area = initial_area
-            flory_huggins_type_interaction = 1.2056 - 260.69 / self.temperature
+            flory_huggins_type_interaction = 1.2056 - 260.69 / temperature
 
             # Comprimento estendido da cauda surfactante (em metros)
-            tail_length = ((self.carbon_chain_length - 1) * LCH2 + LCH3) * 1e-9
+            tail_length = ((carbon_chain_length - 1) * LCH2 + LCH3) * 1e-9
             num_segments = tail_length / segment_length
 
             # Densidade da água e volume molar da água
-            water_density = 999.65 + 2.0438e-1 * (self.temperature - 273.15) - 6.174e-2 * (
-                    self.temperature - 273.15) ** 1.5
+            water_density = 999.65 + 2.0438e-1 * (temperature - 273.15) - 6.174e-2 * (
+                    temperature - 273.15) ** 1.5
 
             # Raio da micela
-            micelle_radius = (3 * self.volume_core * aggregation_number / (4 * PI)) ** (1.0 / 3.0)
+            micelle_radius = (3 * volume_core * aggregation_number / (4 * PI)) ** (1.0 / 3.0)
             area_per_molecule = 4.0 * PI * micelle_radius ** 2 / aggregation_number
 
             packing_fraction = 1.0 / 3.0
             volume_fraction = hydrophilic_volume / (effective_diameter * area_per_molecule)
 
             if volume_fraction < 1.0 and area_per_molecule > initial_area:
-                molecular_weight = self.carbon_chain_length * 12.0 + self.carbon_chain_length * 2.0 + 1.0
-                surface_tension_water = 72.0 - 0.16 * (self.temperature - 298)
-                surface_tension_surfactant = 35.0 - 0.098 * (self.temperature - 298) - 325 * molecular_weight ** (
+                molecular_weight = carbon_chain_length * 12.0 + carbon_chain_length * 2.0 + 1.0
+                surface_tension_water = 72.0 - 0.16 * (temperature - 298)
+                surface_tension_surfactant = 35.0 - 0.098 * (temperature - 298) - 325 * molecular_weight ** (
                         -2.0 / 3.0)
-                surface_tension_ethylene = 42.5 - 19.0 * (self.ethylene_oxide_units ** (-2.0 / 3.0)) - 0.098 * (
-                        self.temperature - 293)
+                surface_tension_ethylene = 42.5 - 19.0 * (ethylene_oxide_units ** (-2.0 / 3.0)) - 0.098 * (
+                        temperature - 293)
 
                 surface_tension_water_surfactant = (surface_tension_surfactant + surface_tension_water -
                                                     2.0 * 0.55 * (
@@ -92,7 +101,7 @@ class CmcCalculator:
                 micelle_volume_fraction = bisect(self.residue_function, 1e-5, 0.9999,
                                                  args=(volume_fraction, segment_length, hydrophilic_volume,
                                                        surface_tension_water_surfactant, surface_tension_oil_surfactant,
-                                                       self.temperature, self.volume_core,
+                                                       temperature, volume_core,
                                                        flory_huggins_type_interaction))
 
                 log_ratio_term = np.log((1.0 - micelle_volume_fraction) / (1.0 - volume_fraction))
@@ -101,16 +110,16 @@ class CmcCalculator:
                 water_interaction_term = flory_huggins_type_interaction * (
                         (1.0 / 2.0) * (micelle_volume_fraction ** 2) - (3.0 / 4.0) * (volume_fraction ** 2))
 
-                aggregated_surface_tension = (surface_tension_water_surfactant + BOLTZMANN_CONST * self.temperature *
-                                              self.volume_core ** (-2.0 / 3.0) * (
+                aggregated_surface_tension = (surface_tension_water_surfactant + BOLTZMANN_CONST * temperature *
+                                              volume_core ** (-2.0 / 3.0) * (
                                                       log_ratio_term + volume_difference_term + water_interaction_term))
 
                 free_energy_segments = np.zeros(7)
-                free_energy_segments[0] = -1.4066076342 * self.carbon_chain_length - 7.579768587
+                free_energy_segments[0] = -1.4066076342 * carbon_chain_length - 7.579768587
                 free_energy_segments[1] = (9.0 * packing_fraction * PI ** 2 / 80.0) * (
                         micelle_radius ** 2 / (num_segments * segment_length ** 2))
                 free_energy_segments[2] = -np.log(1 - (initial_area / area_per_molecule))
-                free_energy_segments[3] = (aggregated_surface_tension / (BOLTZMANN_CONST * self.temperature)) * (
+                free_energy_segments[3] = (aggregated_surface_tension / (BOLTZMANN_CONST * temperature)) * (
                         area_per_molecule - initial_area)
                 free_energy_segments[4] = (volume_fraction * hydrophilic_volume / (segment_length ** 3)) * (
                         (0.5 - flory_huggins_type_interaction) /
@@ -120,19 +129,24 @@ class CmcCalculator:
                                                          effective_diameter * segment_length ** 0.5)) - 3.0)
                 free_energy_segments[6] = np.sum(free_energy_segments[:6]) * aggregation_number * num_micelles
 
-                free_gibbs_energy = self.calculate_gibbs_energy(num_micelles, aggregation_number, free_energy_segments)
+                free_gibbs_energy = self.calculate_gibbs_energy(num_micelles, aggregation_number, free_energy_segments,
+                                                                num_water_molecules, num_surfactant_aggregates)
 
         return free_gibbs_energy
 
-    def calculate_gibbs_energy(self, num_micelles, aggregation_number, free_energy_segments):
-        remaining_surfactants = self.num_surfactant_aggregates - num_micelles * aggregation_number
-        total_molecules = (self.num_water_molecules + remaining_surfactants + num_micelles)
-        water_fraction = self.num_water_molecules / total_molecules
+    def calculate_gibbs_energy(self, num_micelles, aggregation_number, free_energy_segments, num_water_molecules,
+                               num_surfactant_aggregates):
+        """
+        Calcula a energia livre de Gibbs para um conjunto de parâmetros.
+        """
+        remaining_surfactants = num_surfactant_aggregates - num_micelles * aggregation_number
+        total_molecules = (num_water_molecules + remaining_surfactants + num_micelles)
+        water_fraction = num_water_molecules / total_molecules
         free_surfactant_fraction = remaining_surfactants / total_molecules
         micelle_fraction = num_micelles / total_molecules
 
         free_energy_mixture = np.zeros(4)
-        free_energy_mixture[0] = self.num_water_molecules * np.log(water_fraction)
+        free_energy_mixture[0] = num_water_molecules * np.log(water_fraction)
         free_energy_mixture[1] = remaining_surfactants * np.log(free_surfactant_fraction)
         free_energy_mixture[2] = num_micelles * np.log(micelle_fraction)
         free_energy_mixture[3] = free_energy_mixture[0] + free_energy_mixture[1] + free_energy_mixture[2]
@@ -141,3 +155,105 @@ class CmcCalculator:
         free_energy = free_energy_mixture[3] + free_energy_segments[6]
 
         return free_energy
+
+    def cmc_fun(self, x, f_data_in):
+        """
+        Função objetivo para otimização da CMC.
+        """
+        small = 1e-6
+        y = 0.0
+
+        for i in range(len(f_data_in.x)):
+            Nsatemp = f_data_in.x[i]
+            N1aTemp = f_data_in.y[i]
+
+            term1 = x[0] * Nsatemp + x[1]
+            term2 = x[2] * (Nsatemp - x[3])
+            term3 = (1 + (Nsatemp - x[3]) / (np.sqrt((Nsatemp - x[3]) ** 2 + (small ** 0.5) ** 2)))
+
+            y += (term1 - term2 * term3 - N1aTemp) ** 2
+
+        return y
+
+    def optim_cmc(self, setting_files_inputs, input_file_name_units_ok_inp):
+        """
+        Otimiza a concentração micelar crítica (CMC) usando PSO e Nelder-Mead.
+        """
+        nvar = len(input_file_name_units_ok_inp)
+        f_data = DataUse(
+            setting=setting_files_inputs,
+            real_data=np.zeros(nvar + 1),
+            n=3,
+            x=np.array([]),
+            y=np.array([]),
+        )
+
+        f_data.real_data[:nvar] = input_file_name_units_ok_inp
+
+        nsa_i = 10.0
+        nsa_f = 10000.0
+        delta_n = 100.0
+
+        plim = np.array([
+            [10.0, 800.0],
+            [0.000001, 800.0],
+            [0.0001e-9, 5e-8]
+        ])
+
+        n_nsa = int((nsa_f - nsa_i) / delta_n) + 1
+        nw = f_data.real_data[3]
+        f_data.x = np.zeros(n_nsa)
+        f_data.y = np.zeros(n_nsa)
+
+        f_data.real_data[4] *= 1e-27
+
+        with open("cmc.dat", "w") as out_file:
+            out_file.write(f"{n_nsa + 1}\n")
+            nsa = nsa_i
+
+            for i in range(n_nsa):
+                f_data.real_data[nvar] = nsa
+
+                # Método de PSO para otimização
+                lb = plim[:, 0]
+                ub = plim[:, 1]
+                point_optim, _ = pso(lambda x: self.calculate_cmc(x, f_data), lb, ub, swarmsize=200, maxiter=200)
+
+                # Método de Nelder-Mead para otimização
+                result = minimize(lambda x: self.calculate_cmc(x, f_data), point_optim, method='Nelder-Mead',
+                                  options={'maxiter': 200, 'xatol': 1e-7, 'fatol': 1e-7})
+                point_optim = result.x
+
+                f_data.x[i] = nsa
+                f_data.y[i] = nsa - point_optim[0] * point_optim[1]
+                print(f"{f_data.x[i]} {f_data.y[i]}")
+                out_file.write(f"{f_data.x[i]} {f_data.y[i]}\n")
+
+                nsa += delta_n
+
+        # Segunda Otimização
+        f_data.n = 4
+        plim = np.array([
+            [0.0, 1.0],
+            [0.0, 0.1],
+            [0.0, 1.0],
+            [0.0, nsa_f]
+        ])
+
+        # Meétodo PSO para otimização
+        lb = plim[:, 0]
+        ub = plim[:, 1]
+        point_optim, _ = pso(lambda x: self.cmc_fun(x, f_data), lb, ub, swarmsize=100, maxiter=50)
+
+        # Método de Nelder-Mead para otimização
+        result = minimize(lambda x: self.cmc_fun(x, f_data), point_optim, method='Nelder-Mead',
+                          options={'maxiter': 200, 'xatol': 1e-7, 'fatol': 1e-7})
+        point_optim = result.x
+
+        cmc_out = (point_optim[3] / nw) * 1000.0 / 18.0
+        print(f"CMC: {cmc_out}")
+
+        with open("cmc.dat", "a") as out_file:
+            out_file.write(f"{point_optim[3]} {cmc_out * 1000.0}\n")
+
+        return cmc_out
