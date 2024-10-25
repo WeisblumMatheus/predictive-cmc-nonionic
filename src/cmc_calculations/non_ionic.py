@@ -104,6 +104,9 @@ class CmcCalculator:
                                                        temperature, volume_core,
                                                        flory_huggins_type_interaction))
 
+                # Testar para ver se realmente retorna tupla como estava informando, deveria retornar apenas um float
+                micelle_volume_fraction = micelle_volume_fraction[0]
+
                 log_ratio_term = np.log((1.0 - micelle_volume_fraction) / (1.0 - volume_fraction))
                 volume_difference_term = (1.0 - (segment_length ** 3) / hydrophilic_volume) * (
                         micelle_volume_fraction - volume_fraction)
@@ -179,13 +182,14 @@ class CmcCalculator:
         """
         Otimiza a concentração micelar crítica (CMC) usando PSO e Nelder-Mead.
         """
+
         nvar = len(input_file_name_units_ok_inp)
         f_data = DataUse(
             setting=setting_files_inputs,
             real_data=np.zeros(nvar + 1),
             n=3,
             x=np.array([]),
-            y=np.array([]),
+            y=np.array([])
         )
 
         f_data.real_data[:nvar] = input_file_name_units_ok_inp
@@ -214,13 +218,22 @@ class CmcCalculator:
             for i in range(n_nsa):
                 f_data.real_data[nvar] = nsa
 
-                # Método de PSO para otimização
+                # PSO
                 lb = plim[:, 0]
                 ub = plim[:, 1]
                 point_optim, _ = pso(lambda x: self.calculate_cmc(x, f_data), lb, ub, swarmsize=200, maxiter=200)
 
-                # Método de Nelder-Mead para otimização
-                result = minimize(lambda x: self.calculate_cmc(x, f_data), point_optim, method='Nelder-Mead',
+                # Criando pontos inciais para aplicar no Nelder-mead
+                p = np.zeros((f_data.n + 1, f_data.n))
+                y = np.zeros(f_data.n + 1)
+                p[0] = point_optim
+                y[0] = self.calculate_cmc(point_optim, f_data)
+                for j in range(1, f_data.n + 1):
+                    p[j] = p[j - 1] * 1.25
+                    y[j] = self.calculate_cmc(p[j], f_data)
+
+                # Nelder-Mead
+                result = minimize(lambda x: self.calculate_cmc(x, f_data), p[np.argmin(y)], method='Nelder-Mead',
                                   options={'maxiter': 200, 'xatol': 1e-7, 'fatol': 1e-7})
                 point_optim = result.x
 
@@ -231,7 +244,6 @@ class CmcCalculator:
 
                 nsa += delta_n
 
-        # Segunda Otimização
         f_data.n = 4
         plim = np.array([
             [0.0, 1.0],
@@ -240,13 +252,22 @@ class CmcCalculator:
             [0.0, nsa_f]
         ])
 
-        # Meétodo PSO para otimização
+        # PSO
         lb = plim[:, 0]
         ub = plim[:, 1]
         point_optim, _ = pso(lambda x: self.cmc_fun(x, f_data), lb, ub, swarmsize=100, maxiter=50)
 
-        # Método de Nelder-Mead para otimização
-        result = minimize(lambda x: self.cmc_fun(x, f_data), point_optim, method='Nelder-Mead',
+        # Criando pontos inciais para aplicar no Nelder-mead
+        p = np.zeros((f_data.n + 1, f_data.n))
+        y = np.zeros(f_data.n + 1)
+        p[0] = point_optim
+        y[0] = self.cmc_fun(point_optim, f_data)
+        for j in range(1, f_data.n + 1):
+            p[j] = p[j - 1] * 1.05
+            y[j] = self.cmc_fun(p[j], f_data)
+
+        # Nelder-Mead
+        result = minimize(lambda x: self.cmc_fun(x, f_data), p[np.argmin(y)], method='Nelder-Mead',
                           options={'maxiter': 200, 'xatol': 1e-7, 'fatol': 1e-7})
         point_optim = result.x
 
