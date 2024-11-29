@@ -1,7 +1,8 @@
-from dataclasses import dataclass
 import numpy as np
-from scipy.optimize import bisect, minimize
+from scipy.optimize import bisect, minimize, root_scalar
 from pyswarm import pso
+
+from src.cmc_calculations.cmc_start import read_dat_file_values
 
 # Definição de constantes globais
 LCH3 = 0.2765  # Comprimento de um grupo metila (em nm)
@@ -13,15 +14,6 @@ ELEMENTARY_CHARGE = 1.6021766e-19  # Carga elementar (em C)
 EPSILON_0 = 8.8541878e-12  # Permissividade elétrica do vácuo (em F/m)
 
 
-@dataclass
-class DataUse:
-    setting: np.ndarray
-    real_data: np.ndarray
-    n: int
-    x: np.ndarray
-    y: np.ndarray
-
-
 class CmcCalculator:
     """
     Classe para calcular a concentração micelar crítica (CMC) usando métodos numéricos.
@@ -31,6 +23,7 @@ class CmcCalculator:
     def residue_function(surfactant_fraction, volume_fraction, segment_length, hydrophilic_volume,
                          surface_tension_water_surfactant, surface_tension_oil_surfactant, temperature,
                          core_volume, flory_huggins_type_interaction):
+
         """
         Função de resíduo usada para o método de bisseção.
         """
@@ -47,12 +40,12 @@ class CmcCalculator:
         """
         Calcula a concentração micelar crítica (CMC) para um conjunto de parâmetros.
         """
-        temperature = f_data.real_data[0]  # Temperatura em Kelvin
-        carbon_chain_length = f_data.real_data[1]  # Comprimento da cadeia de carbono
-        ethylene_oxide_units = f_data.real_data[2]  # Unidades de óxido de etileno
-        num_water_molecules = f_data.real_data[3]  # Número de moléculas de água
-        volume_core = f_data.real_data[4]  # Volume do núcleo da micela
-        num_surfactant_aggregates = f_data.real_data[-1]  # Número de agregados de surfactantes
+        temperature = f_data[0]  # Temperatura em Kelvin
+        carbon_chain_length = f_data[1]  # Comprimento da cadeia de carbono
+        ethylene_oxide_units = f_data[2]  # Unidades de óxido de etileno
+        num_water_molecules = f_data[3]  # Número de moléculas de água
+        volume_core = f_data[4]  # Volume do núcleo da micela
+        num_surfactant_aggregates = f_data[-1]  # Número de agregados de surfactantes
 
         # Inicializações dos parâmetros de entrada
         free_gibbs_energy = 1e5
@@ -65,16 +58,11 @@ class CmcCalculator:
             ethylene_volume = 0.0631e-27  # Volume de óxido de etileno (em m³)
             hydrophilic_volume = ethylene_oxide_units * ethylene_volume
             initial_area = segment_length * segment_length
-            area = initial_area
             flory_huggins_type_interaction = 1.2056 - 260.69 / temperature
 
             # Comprimento estendido da cauda surfactante (em metros)
             tail_length = ((carbon_chain_length - 1) * LCH2 + LCH3) * 1e-9
             num_segments = tail_length / segment_length
-
-            # Densidade da água e volume molar da água
-            water_density = 999.65 + 2.0438e-1 * (temperature - 273.15) - 6.174e-2 * (
-                    temperature - 273.15) ** 1.5
 
             # Raio da micela
             micelle_radius = (3 * volume_core * aggregation_number / (4 * PI)) ** (1.0 / 3.0)
@@ -98,14 +86,22 @@ class CmcCalculator:
                                                   2.0 * 0.55 * (
                                                           surface_tension_surfactant * surface_tension_ethylene) ** 0.5) * 1e-3
 
-                micelle_volume_fraction = bisect(self.residue_function, 1e-5, 0.9999,
-                                                 args=(volume_fraction, segment_length, hydrophilic_volume,
-                                                       surface_tension_water_surfactant, surface_tension_oil_surfactant,
-                                                       temperature, volume_core,
-                                                       flory_huggins_type_interaction))
-
-                # Testar para ver se realmente retorna tupla como estava informando, deveria retornar apenas um float
-                micelle_volume_fraction = micelle_volume_fraction[0]
+                # micelle_volume_fraction = bisect(self.residue_function, 1e-5, 0.9999,
+                #                                  args=(volume_fraction, segment_length, hydrophilic_volume,
+                #                                        surface_tension_water_surfactant, surface_tension_oil_surfactant,
+                #                                        temperature, volume_core, flory_huggins_type_interaction),
+                #                                  maxiter=100, xtol=1.e-9)
+                result = root_scalar(
+                    self.residue_function,
+                    args=(volume_fraction, segment_length, hydrophilic_volume,
+                          surface_tension_water_surfactant, surface_tension_oil_surfactant,
+                          temperature, volume_core, flory_huggins_type_interaction),
+                    method='newton',
+                    x0=0.9,  # Chute inicial
+                    xtol=1.e-9,
+                    maxiter=100
+                )
+                micelle_volume_fraction = result.root
 
                 log_ratio_term = np.log((1.0 - micelle_volume_fraction) / (1.0 - volume_fraction))
                 volume_difference_term = (1.0 - (segment_length ** 3) / hydrophilic_volume) * (
@@ -159,16 +155,16 @@ class CmcCalculator:
 
         return free_energy
 
-    def cmc_fun(self, x, f_data_in):
+    def cmc_fun(self, x, f_data_in_x, f_data_in_y):
         """
         Função objetivo para otimização da CMC.
         """
         small = 1e-6
         y = 0.0
 
-        for i in range(len(f_data_in.x)):
-            Nsatemp = f_data_in.x[i]
-            N1aTemp = f_data_in.y[i]
+        for i in range(len(f_data_in_x)):
+            Nsatemp = f_data_in_x[i]
+            N1aTemp = f_data_in_y[i]
 
             term1 = x[0] * Nsatemp + x[1]
             term2 = x[2] * (Nsatemp - x[3])
@@ -178,25 +174,17 @@ class CmcCalculator:
 
         return y
 
-    def optim_cmc(self, setting_files_inputs, input_file_name_units_ok_inp):
+    def optim_cmc(self):
         """
         Otimiza a concentração micelar crítica (CMC) usando PSO e Nelder-Mead.
         """
 
-        nvar = len(input_file_name_units_ok_inp)
-        f_data = DataUse(
-            setting=setting_files_inputs,
-            real_data=np.zeros(nvar + 1),
-            n=3,
-            x=np.array([]),
-            y=np.array([])
-        )
-
-        f_data.real_data[:nvar] = input_file_name_units_ok_inp
+        f_data = read_dat_file_values("/Users/weisblum/Documents/TratumProject/cmc_non_ionic/input_non.dat")
 
         nsa_i = 10.0
-        nsa_f = 10000.0
-        delta_n = 100.0
+        nsa_f = f_data[6]
+        delta_n = f_data[5]
+        n = 3
 
         plim = np.array([
             [10.0, 800.0],
@@ -205,46 +193,61 @@ class CmcCalculator:
         ])
 
         n_nsa = int((nsa_f - nsa_i) / delta_n) + 1
-        nw = f_data.real_data[3]
-        f_data.x = np.zeros(n_nsa)
-        f_data.y = np.zeros(n_nsa)
+        nw = f_data[3]
+        x = np.zeros(n_nsa)
+        y = np.zeros(n_nsa)
 
-        f_data.real_data[4] *= 1e-27
+        f_data_in_x = []
+        f_data_in_y = []
 
         with open("cmc.dat", "w") as out_file:
-            out_file.write(f"{n_nsa + 1}\n")
+            out_file.write(f"{int((nsa_f - nsa_i) / delta_n) + 2}\n")
             nsa = nsa_i
+            f_data[4] *= 1e-27
 
             for i in range(n_nsa):
-                f_data.real_data[nvar] = nsa
+                f_data.append(nsa)
 
                 # PSO
                 lb = plim[:, 0]
                 ub = plim[:, 1]
-                point_optim, _ = pso(lambda x: self.calculate_cmc(x, f_data), lb, ub, swarmsize=200, maxiter=200)
 
-                # Criando pontos inciais para aplicar no Nelder-mead
-                p = np.zeros((f_data.n + 1, f_data.n))
-                y = np.zeros(f_data.n + 1)
+                point_optim, _ = pso(lambda x: self.calculate_cmc(x, f_data), lb, ub, swarmsize=200, maxiter=200,
+                                     phig=1.5, omega=0.4, phip=1.5)
+                print(f"pso: {point_optim}")
+
+                # Criando pontos inciais para aplicar no Nelder-Mead (Simplex)
+                p = np.zeros((n + 1, n))  # Inicialização do Simplex
+                y_simplex = np.zeros(n + 1)
                 p[0] = point_optim
-                y[0] = self.calculate_cmc(point_optim, f_data)
-                for j in range(1, f_data.n + 1):
-                    p[j] = p[j - 1] * 1.25
-                    y[j] = self.calculate_cmc(p[j], f_data)
+                y_simplex[0] = self.calculate_cmc(point_optim, f_data)
 
-                # Nelder-Mead
-                result = minimize(lambda x: self.calculate_cmc(x, f_data), p[np.argmin(y)], method='Nelder-Mead',
-                                  options={'maxiter': 200, 'xatol': 1e-7, 'fatol': 1e-7})
+                # Geração de pontos para o Simplex
+                for j in range(1, n + 1):
+                    p[j] = p[j - 1] * 1.25  # Escalonando os pontos
+                    point_optim = p[j]
+                    y_simplex[j] = self.calculate_cmc(point_optim, f_data)
+
+                # Minimização com Nelder-Mead
+                result = minimize(lambda x: self.calculate_cmc(x, f_data), p[np.argmin(y_simplex)],
+                                  method='Nelder-Mead',
+                                  options={'maxiter': 5000, 'xatol': 1e-7, 'fatol': 1e-7, 'initial_simplex': p})
+                print(f"Nelder-Mead result: {result.x}")
+
                 point_optim = result.x
 
-                f_data.x[i] = nsa
-                f_data.y[i] = nsa - point_optim[0] * point_optim[1]
-                print(f"{f_data.x[i]} {f_data.y[i]}")
-                out_file.write(f"{f_data.x[i]} {f_data.y[i]}\n")
+                x[i] = nsa
+                y[i] = nsa - point_optim[0] * point_optim[1]
+
+                f_data_in_x.append(x[i])
+                f_data_in_y.append(y[i])
+                print(f"{x[i]} {y[i]}")
+                out_file.write(f"{x[i]} {y[i]}\n")
 
                 nsa += delta_n
 
-        f_data.n = 4
+        # Segundo ciclo com diferentes limites
+        n = 4
         plim = np.array([
             [0.0, 1.0],
             [0.0, 0.1],
@@ -255,20 +258,24 @@ class CmcCalculator:
         # PSO
         lb = plim[:, 0]
         ub = plim[:, 1]
-        point_optim, _ = pso(lambda x: self.cmc_fun(x, f_data), lb, ub, swarmsize=100, maxiter=50)
+        point_optim, _ = pso(lambda x: self.cmc_fun(x, f_data_in_x, f_data_in_y), lb, ub, swarmsize=100, maxiter=50,
+                             phig=1.5, omega=0.4, phip=1.4)
 
-        # Criando pontos inciais para aplicar no Nelder-mead
-        p = np.zeros((f_data.n + 1, f_data.n))
-        y = np.zeros(f_data.n + 1)
+        # Criando pontos inciais para aplicar no Nelder-Mead
+        p = np.zeros((n + 1, n))
+        z = np.zeros(n + 1)
         p[0] = point_optim
-        y[0] = self.cmc_fun(point_optim, f_data)
-        for j in range(1, f_data.n + 1):
-            p[j] = p[j - 1] * 1.05
-            y[j] = self.cmc_fun(p[j], f_data)
+        z[0] = self.cmc_fun(point_optim, f_data_in_x, f_data_in_y)
 
-        # Nelder-Mead
-        result = minimize(lambda x: self.cmc_fun(x, f_data), p[np.argmin(y)], method='Nelder-Mead',
-                          options={'maxiter': 200, 'xatol': 1e-7, 'fatol': 1e-7})
+        # Geração de pontos para o Simplex
+        for j in range(1, n + 1):
+            p[j] = p[j - 1] * 1.05  # Escalonando os pontos
+            point_optim = p[j]
+            z[j] = self.cmc_fun(point_optim, f_data_in_x, f_data_in_y)
+
+        # Minimização com Nelder-Mead
+        result = minimize(lambda x: self.cmc_fun(x, f_data_in_x, f_data_in_y), p[np.argmin(z)], method='Nelder-Mead',
+                          options={'maxiter': 5000, 'xatol': 1e-7, 'fatol': 1e-7, 'initial_simplex': p})
         point_optim = result.x
 
         cmc_out = (point_optim[3] / nw) * 1000.0 / 18.0
@@ -278,3 +285,8 @@ class CmcCalculator:
             out_file.write(f"{point_optim[3]} {cmc_out * 1000.0}\n")
 
         return cmc_out
+
+
+optimizer = CmcCalculator()
+results = optimizer.optim_cmc()
+print(f"CMC Calculada: {results}")
